@@ -16,9 +16,7 @@
 package io.netty.handler.codec.http2;
 
 import io.netty.channel.ChannelDuplexHandler;
-import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.EventLoopGroup;
 import io.netty.util.internal.UnstableApi;
 
 /**
@@ -27,39 +25,13 @@ import io.netty.util.internal.UnstableApi;
  */
 @UnstableApi
 public final class Http2Codec extends ChannelDuplexHandler {
-
     private final Http2FrameCodec frameCodec;
     private final Http2MultiplexCodec multiplexCodec;
 
-    /**
-     * Construct a new handler whose child channels run in the same event loop as this handler.
-     *
-     * @param server {@code true} this is a server
-     * @param streamHandler the handler added to channels for remotely-created streams. It must be
-     *     {@link ChannelHandler.Sharable}.
-     */
-    public Http2Codec(boolean server, ChannelHandler streamHandler) {
-        this(server, streamHandler, null);
-    }
-
-    /**
-     * Construct a new handler whose child channels run in a different event loop.
-     *
-     * @param server {@code true} this is a server
-     * @param streamHandler the handler added to channels for remotely-created streams. It must be
-     *     {@link ChannelHandler.Sharable}.
-     * @param streamGroup event loop for registering child channels
-     */
-    public Http2Codec(boolean server, ChannelHandler streamHandler,
-                      EventLoopGroup streamGroup) {
-        this(server, streamHandler, streamGroup, new DefaultHttp2FrameWriter());
-    }
-
-    // Visible for testing
-    Http2Codec(boolean server, ChannelHandler streamHandler,
-               EventLoopGroup streamGroup, Http2FrameWriter frameWriter) {
-        frameCodec = new Http2FrameCodec(server, frameWriter);
-        multiplexCodec = new Http2MultiplexCodec(server, streamGroup, streamHandler);
+    Http2Codec(boolean server, Http2StreamChannelBootstrap bootstrap, Http2FrameWriter frameWriter,
+               Http2FrameLogger frameLogger, Http2Settings initialSettings) {
+        frameCodec = new Http2FrameCodec(server, frameWriter, frameLogger, initialSettings);
+        multiplexCodec = new Http2MultiplexCodec(server, bootstrap);
     }
 
     Http2FrameCodec frameCodec() {

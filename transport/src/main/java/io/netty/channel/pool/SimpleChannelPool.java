@@ -43,9 +43,6 @@ public class SimpleChannelPool implements ChannelPool {
     private static final AttributeKey<SimpleChannelPool> POOL_KEY = AttributeKey.newInstance("channelPool");
     private static final IllegalStateException FULL_EXCEPTION = ThrowableUtil.unknownStackTrace(
             new IllegalStateException("ChannelPool full"), SimpleChannelPool.class, "releaseAndOffer(...)");
-    private static final IllegalStateException UNHEALTHY_NON_OFFERED_TO_POOL = ThrowableUtil.unknownStackTrace(
-            new IllegalStateException("Channel is unhealthy not offering it back to pool"),
-            SimpleChannelPool.class, "releaseAndOffer(...)");
 
     private final Deque<Channel> deque = PlatformDependent.newConcurrentDeque();
     private final ChannelPoolHandler handler;
@@ -82,8 +79,8 @@ public class SimpleChannelPool implements ChannelPool {
      * @param handler            the {@link ChannelPoolHandler} that will be notified for the different pool actions
      * @param healthCheck        the {@link ChannelHealthChecker} that will be used to check if a {@link Channel} is
      *                           still healthy when obtain from the {@link ChannelPool}
-     * @param releaseHealthCheck will offercheck channel health before offering back if this parameter set to
-     *                           {@code true}.
+     * @param releaseHealthCheck will check channel health before offering back if this parameter set to {@code true};
+     *                           otherwise, channel health is only checked at acquisition time
      */
     public SimpleChannelPool(Bootstrap bootstrap, final ChannelPoolHandler handler, ChannelHealthChecker healthCheck,
                              boolean releaseHealthCheck) {
@@ -99,6 +96,43 @@ public class SimpleChannelPool implements ChannelPool {
                 handler.channelCreated(ch);
             }
         });
+    }
+
+    /**
+     * Returns the {@link Bootstrap} this pool will use to open new connections.
+     *
+     * @return the {@link Bootstrap} this pool will use to open new connections
+     */
+    protected Bootstrap bootstrap() {
+        return bootstrap;
+    }
+
+    /**
+     * Returns the {@link ChannelPoolHandler} that will be notified for the different pool actions.
+     *
+     * @return the {@link ChannelPoolHandler} that will be notified for the different pool actions
+     */
+    protected ChannelPoolHandler handler() {
+        return handler;
+    }
+
+    /**
+     * Returns the {@link ChannelHealthChecker} that will be used to check if a {@link Channel} is healthy.
+     *
+     * @return the {@link ChannelHealthChecker} that will be used to check if a {@link Channel} is healthy
+     */
+    protected ChannelHealthChecker healthChecker() {
+        return healthCheck;
+    }
+
+    /**
+     * Indicates whether this pool will check the health of channels before offering them back into the pool.
+     *
+     * @return {@code true} if this pool will check the health of channels before offering them back into the pool, or
+     * {@code false} if channel health is only checked at acquisition time
+     */
+    protected boolean releaseHealthCheck() {
+        return releaseHealthCheck;
     }
 
     @Override
@@ -149,7 +183,7 @@ public class SimpleChannelPool implements ChannelPool {
                 });
             }
         } catch (Throwable cause) {
-            promise.setFailure(cause);
+            promise.tryFailure(cause);
         }
         return promise;
     }
@@ -162,7 +196,7 @@ public class SimpleChannelPool implements ChannelPool {
                 release(channel);
             }
         } else {
-            promise.setFailure(future.cause());
+            promise.tryFailure(future.cause());
         }
     }
 
@@ -246,7 +280,7 @@ public class SimpleChannelPool implements ChannelPool {
         // Remove the POOL_KEY attribute from the Channel and check if it was acquired from this pool, if not fail.
         if (channel.attr(POOL_KEY).getAndSet(null) != this) {
             closeAndFail(channel,
-                         // Better include a stracktrace here as this is an user error.
+                         // Better include a stacktrace here as this is an user error.
                          new IllegalArgumentException(
                                  "Channel " + channel + " was not acquired from this ChannelPool"),
                          promise);
@@ -278,7 +312,7 @@ public class SimpleChannelPool implements ChannelPool {
     }
 
     /**
-     * Adds the channel back to the pool only if the channel is healty.
+     * Adds the channel back to the pool only if the channel is healthy.
      * @param channel the channel to put back to the pool
      * @param promise offer operation promise.
      * @param future the future that contains information fif channel is healthy or not.
@@ -288,9 +322,9 @@ public class SimpleChannelPool implements ChannelPool {
             throws Exception {
         if (future.getNow()) { //channel turns out to be healthy, offering and releasing it.
             releaseAndOffer(channel, promise);
-        } else { //channel ont healthy, just releasing it.
+        } else { //channel not healthy, just releasing it.
             handler.channelReleased(channel);
-            closeAndFail(channel, UNHEALTHY_NON_OFFERED_TO_POOL, promise);
+            promise.setSuccess(null);
         }
     }
 
@@ -310,7 +344,7 @@ public class SimpleChannelPool implements ChannelPool {
 
     private static void closeAndFail(Channel channel, Throwable cause, Promise<?> promise) {
         closeChannel(channel);
-        promise.setFailure(cause);
+        promise.tryFailure(cause);
     }
 
     /**

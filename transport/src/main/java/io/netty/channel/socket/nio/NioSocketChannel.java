@@ -19,17 +19,18 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelException;
 import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelMetadata;
 import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoop;
 import io.netty.channel.FileRegion;
 import io.netty.channel.RecvByteBufAllocator;
+import io.netty.util.internal.SocketUtils;
 import io.netty.channel.nio.AbstractNioByteChannel;
 import io.netty.channel.socket.DefaultSocketChannelConfig;
 import io.netty.channel.socket.ServerSocketChannel;
 import io.netty.channel.socket.SocketChannelConfig;
 import io.netty.util.concurrent.GlobalEventExecutor;
+import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
@@ -182,6 +183,11 @@ public class NioSocketChannel extends AbstractNioByteChannel implements io.netty
     }
 
     @Override
+    protected boolean isInputShutdown0() {
+        return isInputShutdown();
+    }
+
+    @Override
     public ChannelFuture shutdownInput(final ChannelPromise promise) {
         Executor closeExecutor = ((NioSocketChannelUnsafe) unsafe()).prepareToClose();
         if (closeExecutor != null) {
@@ -240,32 +246,47 @@ public class NioSocketChannel extends AbstractNioByteChannel implements io.netty
 
     private void shutdownOutput0(final ChannelPromise promise) {
         try {
-            javaChannel().socket().shutdownOutput();
+            shutdownOutput0();
             promise.setSuccess();
         } catch (Throwable t) {
             promise.setFailure(t);
+        }
+    }
+
+    private void shutdownOutput0() throws Exception {
+        if (PlatformDependent.javaVersion() >= 7) {
+            javaChannel().shutdownOutput();
+        } else {
+            javaChannel().socket().shutdownOutput();
         }
     }
 
     private void shutdownInput0(final ChannelPromise promise) {
         try {
-            javaChannel().socket().shutdownInput();
+            shutdownInput0();
             promise.setSuccess();
         } catch (Throwable t) {
             promise.setFailure(t);
         }
     }
 
+    private void shutdownInput0() throws Exception {
+        if (PlatformDependent.javaVersion() >= 7) {
+            javaChannel().shutdownInput();
+        } else {
+            javaChannel().socket().shutdownInput();
+        }
+    }
+
     private void shutdown0(final ChannelPromise promise) {
-        Socket socket = javaChannel().socket();
         Throwable cause = null;
         try {
-            socket.shutdownOutput();
+            shutdownOutput0();
         } catch (Throwable t) {
             cause = t;
         }
         try {
-            socket.shutdownInput();
+            shutdownInput0();
         } catch (Throwable t) {
             if (cause == null) {
                 promise.setFailure(t);
@@ -294,18 +315,26 @@ public class NioSocketChannel extends AbstractNioByteChannel implements io.netty
 
     @Override
     protected void doBind(SocketAddress localAddress) throws Exception {
-        javaChannel().socket().bind(localAddress);
+        doBind0(localAddress);
+    }
+
+    private void doBind0(SocketAddress localAddress) throws Exception {
+        if (PlatformDependent.javaVersion() >= 7) {
+            SocketUtils.bind(javaChannel(), localAddress);
+        } else {
+            SocketUtils.bind(javaChannel().socket(), localAddress);
+        }
     }
 
     @Override
     protected boolean doConnect(SocketAddress remoteAddress, SocketAddress localAddress) throws Exception {
         if (localAddress != null) {
-            javaChannel().socket().bind(localAddress);
+            doBind0(localAddress);
         }
 
         boolean success = false;
         try {
-            boolean connected = javaChannel().connect(remoteAddress);
+            boolean connected = SocketUtils.connect(javaChannel(), remoteAddress);
             if (!connected) {
                 selectionKey().interestOps(SelectionKey.OP_CONNECT);
             }

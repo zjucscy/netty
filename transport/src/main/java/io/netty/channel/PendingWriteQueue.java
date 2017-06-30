@@ -18,6 +18,7 @@ package io.netty.channel;
 import io.netty.util.Recycler;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.PromiseCombiner;
+import io.netty.util.internal.SystemPropertyUtil;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
@@ -28,6 +29,12 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
  */
 public final class PendingWriteQueue {
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(PendingWriteQueue.class);
+    // Assuming a 64-bit JVM:
+    //  - 16 bytes object header
+    //  - 4 reference fields
+    //  - 1 long fields
+    private static final int PENDING_WRITE_OVERHEAD =
+            SystemPropertyUtil.getInt("io.netty.transport.pendingWriteSizeOverhead", 64);
 
     private final ChannelHandlerContext ctx;
     private final ChannelOutboundBuffer buffer;
@@ -73,6 +80,17 @@ public final class PendingWriteQueue {
         return bytes;
     }
 
+    private int size(Object msg) {
+        // It is possible for writes to be triggered from removeAndFailAll(). To preserve ordering,
+        // we should add them to the queue and let removeAndFailAll() fail them later.
+        int messageSize = estimatorHandle.size(msg);
+        if (messageSize < 0) {
+            // Size may be unknown so just use 0
+            messageSize = 0;
+        }
+        return messageSize + PENDING_WRITE_OVERHEAD;
+    }
+
     /**
      * Add the given {@code msg} and {@link ChannelPromise}.
      */
@@ -86,11 +104,8 @@ public final class PendingWriteQueue {
         }
         // It is possible for writes to be triggered from removeAndFailAll(). To preserve ordering,
         // we should add them to the queue and let removeAndFailAll() fail them later.
-        int messageSize = estimatorHandle.size(msg);
-        if (messageSize < 0) {
-            // Size may be unknow so just use 0
-            messageSize = 0;
-        }
+        int messageSize = size(msg);
+
         PendingWrite write = PendingWrite.newInstance(msg, messageSize, promise);
         PendingWrite currentTail = tail;
         if (currentTail == null) {
@@ -107,6 +122,48 @@ public final class PendingWriteQueue {
         if (buffer != null) {
             buffer.incrementPendingOutboundBytes(write.size);
         }
+    }
+
+    /**
+     * Remove all pending write operation and performs them via
+     * {@link ChannelHandlerContext#write(Object, ChannelPromise)}.
+     *
+     * @return  {@link ChannelFuture} if something was written and {@code null}
+     *          if the {@link PendingWriteQueue} is empty.
+     */
+    public ChannelFuture removeAndWriteAll() {
+        assert ctx.executor().inEventLoop();
+
+        if (isEmpty()) {
+            return null;
+        }
+
+        ChannelPromise p = ctx.newPromise();
+        PromiseCombiner combiner = new PromiseCombiner();
+        try {
+            // It is possible for some of the written promises to trigger more writes. The new writes
+            // will "revive" the queue, so we need to write them up until the queue is empty.
+            for (PendingWrite write = head; write != null; write = head) {
+                head = tail = null;
+                size = 0;
+                bytes = 0;
+
+                while (write != null) {
+                    PendingWrite next = write.next;
+                    Object msg = write.msg;
+                    ChannelPromise promise = write.promise;
+                    recycle(write, false);
+                    combiner.add(promise);
+                    ctx.write(msg, promise);
+                    write = next;
+                }
+            }
+            combiner.finish(p);
+        } catch (Throwable cause) {
+            p.setFailure(cause);
+        }
+        assertEmpty();
+        return p;
     }
 
     /**
@@ -154,51 +211,6 @@ public final class PendingWriteQueue {
         ChannelPromise promise = write.promise;
         safeFail(promise, cause);
         recycle(write, true);
-    }
-
-    /**
-     * Remove all pending write operation and performs them via
-     * {@link ChannelHandlerContext#write(Object, ChannelPromise)}.
-     *
-     * @return  {@link ChannelFuture} if something was written and {@code null}
-     *          if the {@link PendingWriteQueue} is empty.
-     */
-    public ChannelFuture removeAndWriteAll() {
-        assert ctx.executor().inEventLoop();
-
-        if (size == 1) {
-            // No need to use ChannelPromiseAggregator for this case.
-            return removeAndWrite();
-        }
-        PendingWrite write = head;
-        if (write == null) {
-            // empty so just return null
-            return null;
-        }
-
-        // Guard against re-entrance by directly reset
-        head = tail = null;
-        size = 0;
-        bytes = 0;
-
-        ChannelPromise p = ctx.newPromise();
-        PromiseCombiner combiner = new PromiseCombiner();
-        try {
-            while (write != null) {
-                PendingWrite next = write.next;
-                Object msg = write.msg;
-                ChannelPromise promise = write.promise;
-                recycle(write, false);
-                combiner.add(promise);
-                ctx.write(msg, promise);
-                write = next;
-            }
-            assertEmpty();
-            combiner.finish(p);
-        } catch (Throwable cause) {
-            p.setFailure(cause);
-        }
-        return p;
     }
 
     private void assertEmpty() {

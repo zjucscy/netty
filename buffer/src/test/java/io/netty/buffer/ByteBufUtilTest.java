@@ -20,16 +20,49 @@ import io.netty.util.CharsetUtil;
 import org.junit.Test;
 
 import java.nio.charset.Charset;
+import java.util.Arrays;
 import java.util.Random;
 
 import static io.netty.buffer.Unpooled.unreleasableBuffer;
-import static io.netty.util.ReferenceCountUtil.releaseLater;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 public class ByteBufUtilTest {
+    @Test
+    public void decodeRandomHexBytesWithEvenLength() {
+        decodeRandomHexBytes(256);
+    }
+
+    @Test
+    public void decodeRandomHexBytesWithOddLength() {
+        decodeRandomHexBytes(257);
+    }
+
+    private static void decodeRandomHexBytes(int len) {
+        byte[] b = new byte[len];
+        Random rand = new Random();
+        rand.nextBytes(b);
+        String hexDump = ByteBufUtil.hexDump(b);
+        for (int i = 0; i <= len; i++) {  // going over sub-strings of various lengths including empty byte[].
+            byte[] b2 = Arrays.copyOfRange(b, i, b.length);
+            byte[] decodedBytes = ByteBufUtil.decodeHexDump(hexDump, i * 2, (len - i) * 2);
+            assertArrayEquals(b2, decodedBytes);
+        }
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void decodeHexDumpWithOddLength() {
+        ByteBufUtil.decodeHexDump("abc");
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void decodeHexDumpWithInvalidChar() {
+        ByteBufUtil.decodeHexDump("fg");
+    }
+
     @Test
     public void equalsBufferSubsections() {
         byte[] b1 = new byte[128];
@@ -99,36 +132,45 @@ public class ByteBufUtilTest {
     @Test
     public void testWriteUsAscii() {
         String usAscii = "NettyRocks";
-        ByteBuf buf = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf = Unpooled.buffer(16);
         buf.writeBytes(usAscii.getBytes(CharsetUtil.US_ASCII));
-        ByteBuf buf2 = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf2 = Unpooled.buffer(16);
         ByteBufUtil.writeAscii(buf2, usAscii);
 
         assertEquals(buf, buf2);
+
+        buf.release();
+        buf2.release();
     }
 
     @Test
     public void testWriteUsAsciiWrapped() {
         String usAscii = "NettyRocks";
-        ByteBuf buf = unreleasableBuffer(releaseLater(Unpooled.buffer(16)));
+        ByteBuf buf = unreleasableBuffer(Unpooled.buffer(16));
         assertWrapped(buf);
         buf.writeBytes(usAscii.getBytes(CharsetUtil.US_ASCII));
-        ByteBuf buf2 = unreleasableBuffer(releaseLater(Unpooled.buffer(16)));
+        ByteBuf buf2 = unreleasableBuffer(Unpooled.buffer(16));
         assertWrapped(buf2);
         ByteBufUtil.writeAscii(buf2, usAscii);
 
         assertEquals(buf, buf2);
+
+        buf.unwrap().release();
+        buf2.unwrap().release();
     }
 
     @Test
     public void testWriteUtf8() {
         String usAscii = "Some UTF-8 like äÄ∏ŒŒ";
-        ByteBuf buf = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf = Unpooled.buffer(16);
         buf.writeBytes(usAscii.getBytes(CharsetUtil.UTF_8));
-        ByteBuf buf2 = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf2 = Unpooled.buffer(16);
         ByteBufUtil.writeUtf8(buf2, usAscii);
 
         assertEquals(buf, buf2);
+
+        buf.release();
+        buf2.release();
     }
 
     @Test
@@ -140,12 +182,15 @@ public class ByteBufUtilTest {
                                 .append('\uDC00')
                                 .append('b')
                                 .toString();
-        ByteBuf buf = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf = Unpooled.buffer(16);
         buf.writeBytes(surrogateString.getBytes(CharsetUtil.UTF_8));
-        ByteBuf buf2 = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf2 = Unpooled.buffer(16);
         ByteBufUtil.writeUtf8(buf2, surrogateString);
 
         assertEquals(buf, buf2);
+
+        buf.release();
+        buf2.release();
     }
 
     @Test
@@ -155,12 +200,15 @@ public class ByteBufUtilTest {
                                 .append('\uDC00')
                                 .append('b')
                                 .toString();
-        ByteBuf buf = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf = Unpooled.buffer(16);
         buf.writeBytes(surrogateString.getBytes(CharsetUtil.UTF_8));
-        ByteBuf buf2 = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf2 = Unpooled.buffer(16);
         ByteBufUtil.writeUtf8(buf2, surrogateString);
 
         assertEquals(buf, buf2);
+
+        buf.release();
+        buf2.release();
     }
 
     @Test
@@ -170,12 +218,15 @@ public class ByteBufUtilTest {
                                 .append('\uD800')
                                 .append('b')
                                 .toString();
-        ByteBuf buf = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf = Unpooled.buffer(16);
         buf.writeBytes(surrogateString.getBytes(CharsetUtil.UTF_8));
-        ByteBuf buf2 = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf2 = Unpooled.buffer(16);
         ByteBufUtil.writeUtf8(buf2, surrogateString);
 
         assertEquals(buf, buf2);
+
+        buf.release();
+        buf2.release();
     }
 
     @Test
@@ -186,12 +237,15 @@ public class ByteBufUtilTest {
                                 .append('\uD800')
                                 .append('b')
                                 .toString();
-        ByteBuf buf = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf = Unpooled.buffer(16);
         buf.writeBytes(surrogateString.getBytes(CharsetUtil.UTF_8));
-        ByteBuf buf2 = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf2 = Unpooled.buffer(16);
         ByteBufUtil.writeUtf8(buf2, surrogateString);
 
         assertEquals(buf, buf2);
+
+        buf.release();
+        buf2.release();
     }
 
     @Test
@@ -202,12 +256,15 @@ public class ByteBufUtilTest {
                                 .append('\uD800')
                                 .append('b')
                                 .toString();
-        ByteBuf buf = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf = Unpooled.buffer(16);
         buf.writeBytes(surrogateString.getBytes(CharsetUtil.UTF_8));
-        ByteBuf buf2 = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf2 = Unpooled.buffer(16);
         ByteBufUtil.writeUtf8(buf2, surrogateString);
 
         assertEquals(buf, buf2);
+
+        buf.release();
+        buf2.release();
     }
 
     @Test
@@ -218,12 +275,15 @@ public class ByteBufUtilTest {
                                 .append('\uDC00')
                                 .append('b')
                                 .toString();
-        ByteBuf buf = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf = Unpooled.buffer(16);
         buf.writeBytes(surrogateString.getBytes(CharsetUtil.UTF_8));
-        ByteBuf buf2 = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf2 = Unpooled.buffer(16);
         ByteBufUtil.writeUtf8(buf2, surrogateString);
 
         assertEquals(buf, buf2);
+
+        buf.release();
+        buf2.release();
     }
 
     @Test
@@ -231,12 +291,15 @@ public class ByteBufUtilTest {
         String surrogateString = new StringBuilder(2)
                                 .append('\uD800')
                                 .toString();
-        ByteBuf buf = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf = Unpooled.buffer(16);
         buf.writeBytes(surrogateString.getBytes(CharsetUtil.UTF_8));
-        ByteBuf buf2 = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf2 = Unpooled.buffer(16);
         ByteBufUtil.writeUtf8(buf2, surrogateString);
 
         assertEquals(buf, buf2);
+
+        buf.release();
+        buf2.release();
     }
 
     @Test
@@ -244,36 +307,45 @@ public class ByteBufUtilTest {
         String surrogateString = new StringBuilder(2)
                                 .append('\uDC00')
                                 .toString();
-        ByteBuf buf = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf = Unpooled.buffer(16);
         buf.writeBytes(surrogateString.getBytes(CharsetUtil.UTF_8));
-        ByteBuf buf2 = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf2 = Unpooled.buffer(16);
         ByteBufUtil.writeUtf8(buf2, surrogateString);
 
         assertEquals(buf, buf2);
+
+        buf.release();
+        buf2.release();
     }
 
     @Test
     public void testWriteUsAsciiString() {
         AsciiString usAscii = new AsciiString("NettyRocks");
-        ByteBuf buf = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf = Unpooled.buffer(16);
         buf.writeBytes(usAscii.toString().getBytes(CharsetUtil.US_ASCII));
-        ByteBuf buf2 = releaseLater(Unpooled.buffer(16));
+        ByteBuf buf2 = Unpooled.buffer(16);
         ByteBufUtil.writeAscii(buf2, usAscii);
 
         assertEquals(buf, buf2);
+
+        buf.release();
+        buf2.release();
     }
 
     @Test
     public void testWriteUtf8Wrapped() {
         String usAscii = "Some UTF-8 like äÄ∏ŒŒ";
-        ByteBuf buf = unreleasableBuffer(releaseLater(Unpooled.buffer(16)));
+        ByteBuf buf = unreleasableBuffer(Unpooled.buffer(16));
         assertWrapped(buf);
         buf.writeBytes(usAscii.getBytes(CharsetUtil.UTF_8));
-        ByteBuf buf2 = unreleasableBuffer(releaseLater(Unpooled.buffer(16)));
+        ByteBuf buf2 = unreleasableBuffer(Unpooled.buffer(16));
         assertWrapped(buf2);
         ByteBufUtil.writeUtf8(buf2, usAscii);
 
         assertEquals(buf, buf2);
+
+        buf.release();
+        buf2.release();
     }
 
     private static void assertWrapped(ByteBuf buf) {

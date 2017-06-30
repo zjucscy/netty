@@ -364,7 +364,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
 
     /**
      * Returns the {@link String} representation of this channel.  The returned
-     * string contains the {@linkplain #hashCode()} ID}, {@linkplain #localAddress() local address},
+     * string contains the {@linkplain #hashCode() ID}, {@linkplain #localAddress() local address},
      * and {@linkplain #remoteAddress() remote address} of this channel for
      * easier identification.
      */
@@ -540,7 +540,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
             if (Boolean.TRUE.equals(config().getOption(ChannelOption.SO_BROADCAST)) &&
                 localAddress instanceof InetSocketAddress &&
                 !((InetSocketAddress) localAddress).getAddress().isAnyLocalAddress() &&
-                !PlatformDependent.isWindows() && !PlatformDependent.isRoot()) {
+                !PlatformDependent.isWindows() && !PlatformDependent.maybeSuperUser()) {
                 // Warn a user about the fact that a non-root user can't receive a
                 // broadcast packet on *nix if the socket is bound on non-wildcard address.
                 logger.warn(
@@ -880,7 +880,6 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
             return unsafeVoidPromise;
         }
 
-        @Deprecated
         protected final boolean ensureOpen(ChannelPromise promise) {
             if (isOpen()) {
                 return true;
@@ -939,17 +938,13 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
          */
         protected final Throwable annotateConnectException(Throwable cause, SocketAddress remoteAddress) {
             if (cause instanceof ConnectException) {
-                Throwable newT = new ConnectException(cause.getMessage() + ": " + remoteAddress);
-                newT.setStackTrace(cause.getStackTrace());
-                cause = newT;
-            } else if (cause instanceof NoRouteToHostException) {
-                Throwable newT = new NoRouteToHostException(cause.getMessage() + ": " + remoteAddress);
-                newT.setStackTrace(cause.getStackTrace());
-                cause = newT;
-            } else if (cause instanceof SocketException) {
-                Throwable newT = new SocketException(cause.getMessage() + ": " + remoteAddress);
-                newT.setStackTrace(cause.getStackTrace());
-                cause = newT;
+                return new AnnotatedConnectException((ConnectException) cause, remoteAddress);
+            }
+            if (cause instanceof NoRouteToHostException) {
+                return new AnnotatedNoRouteToHostException((NoRouteToHostException) cause, remoteAddress);
+            }
+            if (cause instanceof SocketException) {
+                return new AnnotatedSocketException((SocketException) cause, remoteAddress);
             }
 
             return cause;
@@ -1060,6 +1055,54 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
 
         boolean setClosed() {
             return super.trySuccess();
+        }
+    }
+
+    private static final class AnnotatedConnectException extends ConnectException {
+
+        private static final long serialVersionUID = 3901958112696433556L;
+
+        AnnotatedConnectException(ConnectException exception, SocketAddress remoteAddress) {
+            super(exception.getMessage() + ": " + remoteAddress);
+            initCause(exception);
+            setStackTrace(exception.getStackTrace());
+        }
+
+        @Override
+        public Throwable fillInStackTrace() {
+            return this;
+        }
+    }
+
+    private static final class AnnotatedNoRouteToHostException extends NoRouteToHostException {
+
+        private static final long serialVersionUID = -6801433937592080623L;
+
+        AnnotatedNoRouteToHostException(NoRouteToHostException exception, SocketAddress remoteAddress) {
+            super(exception.getMessage() + ": " + remoteAddress);
+            initCause(exception);
+            setStackTrace(exception.getStackTrace());
+        }
+
+        @Override
+        public Throwable fillInStackTrace() {
+            return this;
+        }
+    }
+
+    private static final class AnnotatedSocketException extends SocketException {
+
+        private static final long serialVersionUID = 3896743275010454039L;
+
+        AnnotatedSocketException(SocketException exception, SocketAddress remoteAddress) {
+            super(exception.getMessage() + ": " + remoteAddress);
+            initCause(exception);
+            setStackTrace(exception.getStackTrace());
+        }
+
+        @Override
+        public Throwable fillInStackTrace() {
+            return this;
         }
     }
 }

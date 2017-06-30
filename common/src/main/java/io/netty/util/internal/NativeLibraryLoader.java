@@ -18,14 +18,21 @@ package io.netty.util.internal;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
+import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Method;
 import java.net.URL;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
 import java.util.Arrays;
+import java.util.EnumSet;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * Helper class to load JNI resources.
@@ -38,6 +45,7 @@ public final class NativeLibraryLoader {
     private static final String NATIVE_RESOURCE_HOME = "META-INF/native/";
     private static final String OSNAME;
     private static final File WORKDIR;
+    private static final boolean DELETE_NATIVE_LIB_AFTER_LOADING;
 
     static {
         OSNAME = SystemPropertyUtil.get("os.name", "").toLowerCase(Locale.US).replaceAll("[^a-z0-9]+", "");
@@ -59,6 +67,9 @@ public final class NativeLibraryLoader {
             WORKDIR = tmpdir();
             logger.debug("-Dio.netty.native.workdir: " + WORKDIR + " (io.netty.tmpdir)");
         }
+
+        DELETE_NATIVE_LIB_AFTER_LOADING = SystemPropertyUtil.getBoolean(
+                "io.netty.native.deleteLibAfterLoading", true);
     }
 
     private static File tmpdir() {
@@ -158,10 +169,11 @@ public final class NativeLibraryLoader {
     public static void loadFirstAvailable(ClassLoader loader, String... names) {
         for (String name : names) {
             try {
-                NativeLibraryLoader.load(name, loader);
+                load(name, loader);
+                logger.debug("Successfully loaded the library: {}", name);
                 return;
             } catch (Throwable t) {
-                logger.debug("Unable to load the library: " + name + '.', t);
+                logger.debug("Unable to load the library '{}', trying next name...", name, t);
             }
         }
         throw new IllegalArgumentException("Failed to load any of the given libraries: "
@@ -169,9 +181,12 @@ public final class NativeLibraryLoader {
     }
 
     /**
-     * Load the given library with the specified {@link java.lang.ClassLoader}
+     * Load the given library with the specified {@link ClassLoader}
      */
-    public static void load(String name, ClassLoader loader) {
+    public static void load(String originalName, ClassLoader loader) {
+        // Adjust expected name to support shading of native libraries.
+        String name = SystemPropertyUtil.get("io.netty.packagePrefix", "").replace('.', '-') + originalName;
+
         String libname = System.mapLibraryName(name);
         String path = NATIVE_RESOURCE_HOME + libname;
 
@@ -186,7 +201,7 @@ public final class NativeLibraryLoader {
 
         if (url == null) {
             // Fall back to normal loading of JNI stuff
-            System.loadLibrary(name);
+            loadLibrary(loader, name, false);
             return;
         }
 
@@ -196,7 +211,6 @@ public final class NativeLibraryLoader {
         InputStream in = null;
         OutputStream out = null;
         File tmpFile = null;
-        boolean loaded = false;
         try {
             tmpFile = File.createTempFile(prefix, suffix, WORKDIR);
             in = url.openStream();
@@ -208,42 +222,210 @@ public final class NativeLibraryLoader {
                 out.write(buffer, 0, length);
             }
             out.flush();
-            out.close();
+
+            // Close the output stream before loading the unpacked library,
+            // because otherwise Windows will refuse to load it when it's in use by other process.
+            closeQuietly(out);
             out = null;
 
-            System.load(tmpFile.getPath());
-            loaded = true;
+            loadLibrary(loader, tmpFile.getPath(), true);
+        } catch (UnsatisfiedLinkError e) {
+            try {
+                if (tmpFile != null && tmpFile.isFile() && tmpFile.canRead() &&
+                    !NoexecVolumeDetector.canExecuteExecutable(tmpFile)) {
+                    logger.info("{} exists but cannot be executed even when execute permissions set; " +
+                                "check volume for \"noexec\" flag; use -Dio.netty.native.workdir=[path] " +
+                                "to set native working directory separately.",
+                                tmpFile.getPath());
+                }
+            } catch (Throwable t) {
+                logger.debug("Error checking if {} is on a file store mounted with noexec", tmpFile, t);
+            }
+            // Re-throw to fail the load
+            throw e;
         } catch (Exception e) {
             throw (UnsatisfiedLinkError) new UnsatisfiedLinkError(
                     "could not load a native library: " + name).initCause(e);
         } finally {
-            if (in != null) {
+            closeQuietly(in);
+            closeQuietly(out);
+            // After we load the library it is safe to delete the file.
+            // We delete the file immediately to free up resources as soon as possible,
+            // and if this fails fallback to deleting on JVM exit.
+            if (tmpFile != null && (!DELETE_NATIVE_LIB_AFTER_LOADING || !tmpFile.delete())) {
+                tmpFile.deleteOnExit();
+            }
+        }
+    }
+
+    /**
+     * Loading the native library into the specified {@link ClassLoader}.
+     * @param loader - The {@link ClassLoader} where the native library will be loaded into
+     * @param name - The native library path or name
+     * @param absolute - Whether the native library will be loaded by path or by name
+     */
+    private static void loadLibrary(final ClassLoader loader, final String name, final boolean absolute) {
+        try {
+            // Make sure the helper is belong to the target ClassLoader.
+            final Class<?> newHelper = tryToLoadClass(loader, NativeLibraryUtil.class);
+            loadLibraryByHelper(newHelper, name, absolute);
+            return;
+        } catch (UnsatisfiedLinkError e) { // Should by pass the UnsatisfiedLinkError here!
+            logger.debug("Unable to load the library '{}', trying other loading mechanism.", name, e);
+        } catch (Exception e) {
+            logger.debug("Unable to load the library '{}', trying other loading mechanism.", name, e);
+        }
+        NativeLibraryUtil.loadLibrary(name, absolute);  // Fallback to local helper class.
+    }
+
+    private static void loadLibraryByHelper(final Class<?> helper, final String name, final boolean absolute)
+            throws UnsatisfiedLinkError {
+        Object ret = AccessController.doPrivileged(new PrivilegedAction<Object>() {
+            @Override
+            public Object run() {
                 try {
-                    in.close();
-                } catch (IOException ignore) {
-                    // ignore
+                    // Invoke the helper to load the native library, if succeed, then the native
+                    // library belong to the specified ClassLoader.
+                    Method method = helper.getMethod("loadLibrary", String.class, boolean.class);
+                    method.setAccessible(true);
+                    return method.invoke(null, name, absolute);
+                } catch (Exception e) {
+                    return e;
                 }
             }
-            if (out != null) {
-                try {
-                    out.close();
-                } catch (IOException ignore) {
-                    // ignore
-                }
-            }
-            if (tmpFile != null) {
-                if (loaded) {
-                    tmpFile.deleteOnExit();
+        });
+        if (ret instanceof Throwable) {
+            Throwable error = (Throwable) ret;
+            Throwable cause = error.getCause();
+            if (cause != null) {
+                if (cause instanceof UnsatisfiedLinkError) {
+                    throw (UnsatisfiedLinkError) cause;
                 } else {
-                    if (!tmpFile.delete()) {
-                        tmpFile.deleteOnExit();
+                    throw new UnsatisfiedLinkError(cause.getMessage());
+                }
+            }
+            throw new UnsatisfiedLinkError(error.getMessage());
+        }
+    }
+
+    /**
+     * Try to load the helper {@link Class} into specified {@link ClassLoader}.
+     * @param loader - The {@link ClassLoader} where to load the helper {@link Class}
+     * @param helper - The helper {@link Class}
+     * @return A new helper Class defined in the specified ClassLoader.
+     * @throws ClassNotFoundException Helper class not found or loading failed
+     */
+    private static Class<?> tryToLoadClass(final ClassLoader loader, final Class<?> helper)
+            throws ClassNotFoundException {
+        try {
+            return loader.loadClass(helper.getName());
+        } catch (ClassNotFoundException e) {
+            // The helper class is NOT found in target ClassLoader, we have to define the helper class.
+            final byte[] classBinary = classToByteArray(helper);
+            return AccessController.doPrivileged(new PrivilegedAction<Class<?>>() {
+                @Override
+                public Class<?> run() {
+                    try {
+                        // Define the helper class in the target ClassLoader,
+                        //  then we can call the helper to load the native library.
+                        Method defineClass = ClassLoader.class.getDeclaredMethod("defineClass", String.class,
+                                byte[].class, int.class, int.class);
+                        defineClass.setAccessible(true);
+                        return (Class<?>) defineClass.invoke(loader, helper.getName(), classBinary, 0,
+                                classBinary.length);
+                    } catch (Exception e) {
+                        throw new IllegalStateException("Define class failed!", e);
                     }
                 }
+            });
+        }
+    }
+
+    /**
+     * Load the helper {@link Class} as a byte array, to be redefined in specified {@link ClassLoader}.
+     * @param clazz - The helper {@link Class} provided by this bundle
+     * @return The binary content of helper {@link Class}.
+     * @throws ClassNotFoundException Helper class not found or loading failed
+     */
+    private static byte[] classToByteArray(Class<?> clazz) throws ClassNotFoundException {
+        String fileName = clazz.getName();
+        int lastDot = fileName.lastIndexOf('.');
+        if (lastDot > 0) {
+            fileName = fileName.substring(lastDot + 1);
+        }
+        URL classUrl = clazz.getResource(fileName + ".class");
+        if (classUrl == null) {
+            throw new ClassNotFoundException(clazz.getName());
+        }
+        byte[] buf = new byte[1024];
+        ByteArrayOutputStream out = new ByteArrayOutputStream(4096);
+        InputStream in = null;
+        try {
+            in = classUrl.openStream();
+            for (int r; (r = in.read(buf)) != -1;) {
+                out.write(buf, 0, r);
+            }
+            return out.toByteArray();
+        } catch (IOException ex) {
+            throw new ClassNotFoundException(clazz.getName(), ex);
+        } finally {
+            closeQuietly(in);
+            closeQuietly(out);
+        }
+    }
+
+    private static void closeQuietly(Closeable c) {
+        if (c != null) {
+            try {
+                c.close();
+            } catch (IOException ignore) {
+                // ignore
             }
         }
     }
 
     private NativeLibraryLoader() {
         // Utility
+    }
+
+    private static final class NoexecVolumeDetector {
+
+        private static boolean canExecuteExecutable(File file) throws IOException {
+            if (PlatformDependent.javaVersion() < 7) {
+                // Pre-JDK7, the Java API did not directly support POSIX permissions; instead of implementing a custom
+                // work-around, assume true, which disables the check.
+                return true;
+            }
+
+            // If we can already execute, there is nothing to do.
+            if (file.canExecute()) {
+                return true;
+            }
+
+            // On volumes, with noexec set, even files with the executable POSIX permissions will fail to execute.
+            // The File#canExecute() method honors this behavior, probaby via parsing the noexec flag when initializing
+            // the UnixFileStore, though the flag is not exposed via a public API.  To find out if library is being
+            // loaded off a volume with noexec, confirm or add executalbe permissions, then check File#canExecute().
+
+            // Note: We use FQCN to not break when netty is used in java6
+            Set<java.nio.file.attribute.PosixFilePermission> existingFilePermissions =
+                    java.nio.file.Files.getPosixFilePermissions(file.toPath());
+            Set<java.nio.file.attribute.PosixFilePermission> executePermissions =
+                    EnumSet.of(java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE,
+                            java.nio.file.attribute.PosixFilePermission.GROUP_EXECUTE,
+                            java.nio.file.attribute.PosixFilePermission.OTHERS_EXECUTE);
+            if (existingFilePermissions.containsAll(executePermissions)) {
+                return false;
+            }
+
+            Set<java.nio.file.attribute.PosixFilePermission> newPermissions = EnumSet.copyOf(existingFilePermissions);
+            newPermissions.addAll(executePermissions);
+            java.nio.file.Files.setPosixFilePermissions(file.toPath(), newPermissions);
+            return file.canExecute();
+        }
+
+        private NoexecVolumeDetector() {
+            // Utility
+        }
     }
 }

@@ -38,7 +38,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
     private final byte[] dictionary;
 
     // GZIP related
-    private final CRC32 crc;
+    private final ByteBufChecksum crc;
 
     private enum GzipState {
         HEADER_START,
@@ -91,7 +91,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
         switch (wrapper) {
             case GZIP:
                 inflater = new Inflater(true);
-                crc = new CRC32();
+                crc = ByteBufChecksum.wrapChecksum(new CRC32());
                 break;
             case NONE:
                 inflater = new Inflater(true);
@@ -167,25 +167,14 @@ public class JdkZlibDecoder extends ZlibDecoder {
             inflater.setInput(array);
         }
 
-        int maxOutputLength = inflater.getRemaining() << 1;
-        ByteBuf decompressed = ctx.alloc().heapBuffer(maxOutputLength);
+        ByteBuf decompressed = ctx.alloc().heapBuffer(inflater.getRemaining() << 1);
         try {
             boolean readFooter = false;
-            byte[] outArray = decompressed.array();
             while (!inflater.needsInput()) {
+                byte[] outArray = decompressed.array();
                 int writerIndex = decompressed.writerIndex();
                 int outIndex = decompressed.arrayOffset() + writerIndex;
-                int length = decompressed.writableBytes();
-
-                if (length == 0) {
-                    // completely filled the buffer allocate a new one and start to fill it
-                    out.add(decompressed);
-                    decompressed = ctx.alloc().heapBuffer(maxOutputLength);
-                    outArray = decompressed.array();
-                    continue;
-                }
-
-                int outputLength = inflater.inflate(outArray, outIndex, length);
+                int outputLength = inflater.inflate(outArray, outIndex, decompressed.writableBytes());
                 if (outputLength > 0) {
                     decompressed.writerIndex(writerIndex + outputLength);
                     if (crc != null) {
@@ -208,6 +197,8 @@ public class JdkZlibDecoder extends ZlibDecoder {
                         readFooter = true;
                     }
                     break;
+                } else {
+                    decompressed.ensureWritable(inflater.getRemaining() << 1);
                 }
             }
 
@@ -271,10 +262,8 @@ public class JdkZlibDecoder extends ZlibDecoder {
                 }
 
                 // mtime (int)
-                crc.update(in.readByte());
-                crc.update(in.readByte());
-                crc.update(in.readByte());
-                crc.update(in.readByte());
+                crc.update(in, in.readerIndex(), 4);
+                in.skipBytes(4);
 
                 crc.update(in.readUnsignedByte()); // extra flags
                 crc.update(in.readUnsignedByte()); // operating system
@@ -298,9 +287,8 @@ public class JdkZlibDecoder extends ZlibDecoder {
                     if (in.readableBytes() < xlen) {
                         return false;
                     }
-                    byte[] xtra = new byte[xlen];
-                    in.readBytes(xtra);
-                    crc.update(xtra);
+                    crc.update(in, in.readerIndex(), xlen);
+                    in.skipBytes(xlen);
                 }
                 gzipState = GzipState.SKIP_FNAME;
             case SKIP_FNAME:
@@ -375,7 +363,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
         long readCrc = crc.getValue();
         if (crcValue != readCrc) {
             throw new DecompressionException(
-                    "CRC value missmatch. Expected: " + crcValue + ", Got: " + readCrc);
+                    "CRC value mismatch. Expected: " + crcValue + ", Got: " + readCrc);
         }
     }
 

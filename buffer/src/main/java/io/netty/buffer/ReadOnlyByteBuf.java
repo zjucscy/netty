@@ -103,12 +103,12 @@ public class ReadOnlyByteBuf extends AbstractDerivedByteBuf {
 
     @Override
     public boolean hasMemoryAddress() {
-        return false;
+        return unwrap().hasMemoryAddress();
     }
 
     @Override
     public long memoryAddress() {
-        throw new ReadOnlyBufferException();
+        return unwrap().memoryAddress();
     }
 
     @Override
@@ -411,5 +411,10 @@ public class ReadOnlyByteBuf extends AbstractDerivedByteBuf {
     @Override
     public ByteBuf capacity(int newCapacity) {
         throw new ReadOnlyBufferException();
+    }
+
+    @Override
+    public ByteBuf asReadOnly() {
+        return this;
     }
 }

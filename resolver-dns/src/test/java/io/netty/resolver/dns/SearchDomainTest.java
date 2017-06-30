@@ -24,6 +24,7 @@ import org.junit.Before;
 import org.junit.Test;
 
 import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -32,8 +33,12 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
+import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.not;
+import static org.hamcrest.core.StringContains.containsString;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 
 public class SearchDomainTest {
@@ -41,13 +46,14 @@ public class SearchDomainTest {
     private DnsNameResolverBuilder newResolver() {
         return new DnsNameResolverBuilder(group.next())
             .channelType(NioDatagramChannel.class)
-            .nameServerAddresses(DnsServerAddresses.singleton(dnsServer.localAddress()))
+            .nameServerProvider(new SingletonDnsServerAddressStreamProvider(dnsServer.localAddress()))
             .maxQueriesPerResolve(1)
             .optResourceEnabled(false);
     }
 
     private TestDnsServer dnsServer;
     private EventLoopGroup group;
+    private DnsNameResolver resolver;
 
     @Before
     public void before() {
@@ -59,6 +65,9 @@ public class SearchDomainTest {
         if (dnsServer != null) {
             dnsServer.stop();
             dnsServer = null;
+        }
+        if (resolver != null) {
+            resolver.close();
         }
         group.shutdownGracefully();
     }
@@ -77,7 +86,7 @@ public class SearchDomainTest {
         dnsServer = new TestDnsServer(store);
         dnsServer.start();
 
-        DnsNameResolver resolver = newResolver().searchDomains(Collections.singletonList("foo.com")).build();
+        resolver = newResolver().searchDomains(Collections.singletonList("foo.com")).ndots(2).build();
 
         String a = "host1.foo.com";
         String resolved = assertResolve(resolver, a);
@@ -105,9 +114,10 @@ public class SearchDomainTest {
         resolved = assertResolve(resolver, "host4.sub");
         assertEquals(store.getAddress("host4.sub.foo.com"), resolved);
 
-        // "host5.sub" contains a dot and is resolved
+        // "host5.sub" would have been directly resolved but since it has less than ndots the "foo.com" search domain
+        // is used.
         resolved = assertResolve(resolver, "host5.sub");
-        assertEquals(store.getAddress("host5.sub"), resolved);
+        assertEquals(store.getAddress("host5.sub.foo.com"), resolved);
     }
 
     @Test
@@ -124,7 +134,7 @@ public class SearchDomainTest {
         dnsServer = new TestDnsServer(store);
         dnsServer.start();
 
-        DnsNameResolver resolver = newResolver().searchDomains(Collections.singletonList("foo.com")).build();
+        resolver = newResolver().searchDomains(Collections.singletonList("foo.com")).ndots(2).build();
 
         String a = "host1.foo.com";
         List<String> resolved = assertResolveAll(resolver, a);
@@ -152,9 +162,10 @@ public class SearchDomainTest {
         resolved = assertResolveAll(resolver, "host4.sub");
         assertEquals(store.getAddresses("host4.sub.foo.com"), resolved);
 
-        // "host5.sub" contains a dot and is resolved
+        // "host5.sub" would have been directly resolved but since it has less than ndots the "foo.com" search domain
+        // is used.
         resolved = assertResolveAll(resolver, "host5.sub");
-        assertEquals(store.getAddresses("host5.sub"), resolved);
+        assertEquals(store.getAddresses("host5.sub.foo.com"), resolved);
     }
 
     @Test
@@ -169,7 +180,7 @@ public class SearchDomainTest {
         dnsServer = new TestDnsServer(store);
         dnsServer.start();
 
-        DnsNameResolver resolver = newResolver().searchDomains(Arrays.asList("foo.com", "bar.com")).build();
+        resolver = newResolver().searchDomains(Arrays.asList("foo.com", "bar.com")).build();
 
         // "host1" resolves via the "foo.com" search path
         String resolved = assertResolve(resolver, "host1");
@@ -198,7 +209,7 @@ public class SearchDomainTest {
         dnsServer = new TestDnsServer(store);
         dnsServer.start();
 
-        DnsNameResolver resolver = newResolver().searchDomains(Collections.singleton("foo.com")).ndots(2).build();
+        resolver = newResolver().searchDomains(Collections.singleton("foo.com")).ndots(2).build();
 
         String resolved = assertResolve(resolver, "host1.sub");
         assertEquals(store.getAddress("host1.sub.foo.com"), resolved);
@@ -206,6 +217,32 @@ public class SearchDomainTest {
         // "host2.sub" is resolved with the foo.com search domain as ndots = 2
         resolved = assertResolve(resolver, "host2.sub");
         assertEquals(store.getAddress("host2.sub.foo.com"), resolved);
+    }
+
+    @Test
+    public void testSearchDomainWithNdots0() throws Exception {
+        Set<String> domains = new HashSet<String>();
+        domains.add("host1");
+        domains.add("host1.foo.com");
+        domains.add("host2.foo.com");
+
+        TestDnsServer.MapRecordStoreA store = new TestDnsServer.MapRecordStoreA(domains);
+        dnsServer = new TestDnsServer(store);
+        dnsServer.start();
+
+        resolver = newResolver().searchDomains(Collections.singleton("foo.com")).ndots(0).build();
+
+        // "host1" resolves directly as ndots = 0
+        String resolved = assertResolve(resolver, "host1");
+        assertEquals(store.getAddress("host1"), resolved);
+
+        // "host1.foo.com" resolves to host1.foo
+        resolved = assertResolve(resolver, "host1.foo.com");
+        assertEquals(store.getAddress("host1.foo.com"), resolved);
+
+        // "host2" shouldn't resolve because it is not in the known domain names, and "host2" has 0 dots which is not
+        // less ndots (which is also 0).
+        assertNotResolve(resolver, "host2");
     }
 
     private void assertNotResolve(DnsNameResolver resolver, String inetHost) throws InterruptedException {
@@ -234,5 +271,39 @@ public class SearchDomainTest {
             list.add(addr.getHostAddress());
         }
         return list;
+    }
+
+    @Test
+    public void testExceptionMsgContainsSearchDomain() throws Exception {
+        TestDnsServer.MapRecordStoreA store = new TestDnsServer.MapRecordStoreA(Collections.<String>emptySet());
+        dnsServer = new TestDnsServer(store);
+        dnsServer.start();
+
+        resolver = newResolver().searchDomains(Collections.singletonList("foo.com")).ndots(2).build();
+
+        Future<InetAddress> fut = resolver.resolve("unknown.hostname");
+        assertTrue(fut.await(10, TimeUnit.SECONDS));
+        assertFalse(fut.isSuccess());
+        final Throwable cause = fut.cause();
+        assertThat(cause, instanceOf(UnknownHostException.class));
+        assertThat("search domain is included in UnknownHostException", cause.getMessage(),
+            containsString("foo.com"));
+    }
+
+    @Test
+    public void testExceptionMsgDoesNotContainSearchDomainIfNdotsNotHighEnough() throws Exception {
+        TestDnsServer.MapRecordStoreA store = new TestDnsServer.MapRecordStoreA(Collections.<String>emptySet());
+        dnsServer = new TestDnsServer(store);
+        dnsServer.start();
+
+        resolver = newResolver().searchDomains(Collections.singletonList("foo.com")).ndots(1).build();
+
+        Future<InetAddress> fut = resolver.resolve("unknown.hostname");
+        assertTrue(fut.await(10, TimeUnit.SECONDS));
+        assertFalse(fut.isSuccess());
+        final Throwable cause = fut.cause();
+        assertThat(cause, instanceOf(UnknownHostException.class));
+        assertThat("search domain is included in UnknownHostException", cause.getMessage(),
+                not(containsString("foo.com")));
     }
 }

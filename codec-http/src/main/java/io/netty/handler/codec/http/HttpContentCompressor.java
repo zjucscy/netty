@@ -19,7 +19,6 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.compression.ZlibCodecFactory;
 import io.netty.handler.codec.compression.ZlibWrapper;
-import io.netty.util.internal.StringUtil;
 
 /**
  * Compresses an {@link HttpMessage} and an {@link HttpContent} in {@code gzip} or
@@ -102,8 +101,9 @@ public class HttpContentCompressor extends HttpContentEncoder {
     @Override
     protected Result beginEncode(HttpResponse headers, String acceptEncoding) throws Exception {
         String contentEncoding = headers.headers().get(HttpHeaderNames.CONTENT_ENCODING);
-        if (contentEncoding != null &&
-            !HttpHeaderValues.IDENTITY.contentEqualsIgnoreCase(contentEncoding)) {
+        if (contentEncoding != null) {
+            // Content-Encoding was set, either as something specific or as the IDENTITY encoding
+            // Therefore, we should NOT encode here
             return null;
         }
 
@@ -136,12 +136,12 @@ public class HttpContentCompressor extends HttpContentEncoder {
         float starQ = -1.0f;
         float gzipQ = -1.0f;
         float deflateQ = -1.0f;
-        for (String encoding: StringUtil.split(acceptEncoding, ',')) {
+        for (String encoding : acceptEncoding.split(",")) {
             float q = 1.0f;
             int equalsPos = encoding.indexOf('=');
             if (equalsPos != -1) {
                 try {
-                    q = Float.valueOf(encoding.substring(equalsPos + 1));
+                    q = Float.parseFloat(encoding.substring(equalsPos + 1));
                 } catch (NumberFormatException e) {
                     // Ignore encoding
                     q = 0.0f;

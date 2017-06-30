@@ -22,7 +22,6 @@ import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaderValues;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.LastHttpContent;
-import io.netty.handler.codec.http.multipart.HttpPostBodyUtil.SeekAheadNoBackArrayException;
 import io.netty.handler.codec.http.multipart.HttpPostBodyUtil.SeekAheadOptimize;
 import io.netty.handler.codec.http.multipart.HttpPostBodyUtil.TransferEncodingMechanism;
 import io.netty.handler.codec.http.multipart.HttpPostRequestDecoder.EndOfDataDecoderException;
@@ -42,6 +41,7 @@ import java.util.Map;
 import java.util.TreeMap;
 
 import static io.netty.buffer.Unpooled.*;
+import static io.netty.util.internal.ObjectUtil.*;
 
 /**
  * This decoder will decode Body and can handle POST BODY.
@@ -93,7 +93,7 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
     private int bodyListHttpDataRank;
 
     /**
-     * If multipart, this is the boundary for the flobal multipart
+     * If multipart, this is the boundary for the global multipart
      */
     private String multipartDataBoundary;
 
@@ -172,18 +172,9 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
      *             errors
      */
     public HttpPostMultipartRequestDecoder(HttpDataFactory factory, HttpRequest request, Charset charset) {
-        if (factory == null) {
-            throw new NullPointerException("factory");
-        }
-        if (request == null) {
-            throw new NullPointerException("request");
-        }
-        if (charset == null) {
-            throw new NullPointerException("charset");
-        }
-        this.request = request;
-        this.charset = charset;
-        this.factory = factory;
+        this.request = checkNotNull(request, "request");
+        this.charset = checkNotNull(charset, "charset");
+        this.factory = checkNotNull(factory, "factory");
         // Fill default values
 
         setMultipart(this.request.headers().get(HttpHeaderNames.CONTENT_TYPE));
@@ -238,10 +229,7 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
      */
     @Override
     public void setDiscardThreshold(int discardThreshold) {
-        if (discardThreshold < 0) {
-          throw new IllegalArgumentException("discardThreshold must be >= 0");
-        }
-        this.discardThreshold = discardThreshold;
+        this.discardThreshold = checkPositiveOrZero(discardThreshold, "discardThreshold");
     }
 
     /**
@@ -547,7 +535,7 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
             }
             // load data
             try {
-                loadFieldMultipart(multipartDataBoundary);
+                loadFieldMultipart(undecodedChunk, multipartDataBoundary, currentAttribute);
             } catch (NotEnoughDataDecoderException ignored) {
                 return null;
             }
@@ -589,19 +577,16 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
      *
      * @throws NotEnoughDataDecoderException
      */
-    void skipControlCharacters() {
-        SeekAheadOptimize sao;
-        try {
-            sao = new SeekAheadOptimize(undecodedChunk);
-        } catch (SeekAheadNoBackArrayException ignored) {
+    private static void skipControlCharacters(ByteBuf undecodedChunk) {
+        if (!undecodedChunk.hasArray()) {
             try {
-                skipControlCharactersStandard();
+                skipControlCharactersStandard(undecodedChunk);
             } catch (IndexOutOfBoundsException e1) {
                 throw new NotEnoughDataDecoderException(e1);
             }
             return;
         }
-
+        SeekAheadOptimize sao = new SeekAheadOptimize(undecodedChunk);
         while (sao.pos < sao.limit) {
             char c = (char) (sao.bytes[sao.pos++] & 0xFF);
             if (!Character.isISOControl(c) && !Character.isWhitespace(c)) {
@@ -612,7 +597,7 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
         throw new NotEnoughDataDecoderException("Access out of bounds");
     }
 
-    void skipControlCharactersStandard() {
+    private static void skipControlCharactersStandard(ByteBuf undecodedChunk) {
         for (;;) {
             char c = (char) undecodedChunk.readUnsignedByte();
             if (!Character.isISOControl(c) && !Character.isWhitespace(c)) {
@@ -639,7 +624,7 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
         // --AaB03x or --AaB03x--
         int readerIndex = undecodedChunk.readerIndex();
         try {
-            skipControlCharacters();
+            skipControlCharacters(undecodedChunk);
         } catch (NotEnoughDataDecoderException ignored) {
             undecodedChunk.readerIndex(readerIndex);
             return null;
@@ -647,7 +632,7 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
         skipOneLine();
         String newline;
         try {
-            newline = readDelimiter(delimiter);
+            newline = readDelimiter(undecodedChunk, delimiter);
         } catch (NotEnoughDataDecoderException ignored) {
             undecodedChunk.readerIndex(readerIndex);
             return null;
@@ -686,8 +671,8 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
         while (!skipOneLine()) {
             String newline;
             try {
-                skipControlCharacters();
-                newline = readLine();
+                skipControlCharacters(undecodedChunk);
+                newline = readLine(undecodedChunk, charset);
             } catch (NotEnoughDataDecoderException ignored) {
                 undecodedChunk.readerIndex(readerIndex);
                 return null;
@@ -704,7 +689,7 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
                 if (checkSecondArg) {
                     // read next values and store them in the map as Attribute
                     for (int i = 2; i < contents.length; i++) {
-                        String[] values = StringUtil.split(contents[i], '=', 2);
+                        String[] values = contents[i].split("=", 2);
                         Attribute attribute;
                         try {
                             String name = cleanString(values[0]);
@@ -764,12 +749,12 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
                     }
                 } else {
                     for (int i = 1; i < contents.length; i++) {
-                        if (contents[i].toLowerCase().startsWith(HttpHeaderValues.CHARSET.toString())) {
+                        final String charsetHeader = HttpHeaderValues.CHARSET.toString();
+                        if (contents[i].regionMatches(true, 0, charsetHeader, 0, charsetHeader.length())) {
                             String values = StringUtil.substringAfter(contents[i], '=');
                             Attribute attribute;
                             try {
-                                attribute = factory.createAttribute(request, HttpHeaderValues.CHARSET.toString(),
-                                        cleanString(values));
+                                attribute = factory.createAttribute(request, charsetHeader, cleanString(values));
                             } catch (NullPointerException e) {
                                 throw new ErrorDataDecoderException(e);
                             } catch (IllegalArgumentException e) {
@@ -899,7 +884,7 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
         }
         // load data as much as possible
         try {
-            readFileUploadByteMultipart(delimiter);
+            readFileUploadByteMultipart(undecodedChunk, delimiter, currentFileUpload);
         } catch (NotEnoughDataDecoderException e) {
             // do not change the buffer position
             // since some can be already saved into FileUpload
@@ -983,10 +968,10 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
      *
      * @return the String from one line
      * @throws NotEnoughDataDecoderException
-     *             Need more chunks and reset the readerInder to the previous
+     *             Need more chunks and reset the {@code readerIndex} to the previous
      *             value
      */
-    private String readLineStandard() {
+    private static String readLineStandard(ByteBuf undecodedChunk, Charset charset) {
         int readerIndex = undecodedChunk.readerIndex();
         try {
             ByteBuf line = buffer(64);
@@ -1023,16 +1008,14 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
      *
      * @return the String from one line
      * @throws NotEnoughDataDecoderException
-     *             Need more chunks and reset the readerInder to the previous
+     *             Need more chunks and reset the {@code readerIndex} to the previous
      *             value
      */
-    private String readLine() {
-        SeekAheadOptimize sao;
-        try {
-            sao = new SeekAheadOptimize(undecodedChunk);
-        } catch (SeekAheadNoBackArrayException ignored) {
-            return readLineStandard();
+    private static String readLine(ByteBuf undecodedChunk, Charset charset) {
+        if (!undecodedChunk.hasArray()) {
+            return readLineStandard(undecodedChunk, charset);
         }
+        SeekAheadOptimize sao = new SeekAheadOptimize(undecodedChunk);
         int readerIndex = undecodedChunk.readerIndex();
         try {
             ByteBuf line = buffer(64);
@@ -1080,10 +1063,10 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
      * @return the String from one line as the delimiter searched (opening or
      *         closing)
      * @throws NotEnoughDataDecoderException
-     *             Need more chunks and reset the readerInder to the previous
+     *             Need more chunks and reset the {@code readerIndex} to the previous
      *             value
      */
-    private String readDelimiterStandard(String delimiter) {
+    private static String readDelimiterStandard(ByteBuf undecodedChunk, String delimiter) {
         int readerIndex = undecodedChunk.readerIndex();
         try {
             StringBuilder sb = new StringBuilder(64);
@@ -1177,13 +1160,11 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
      *             Need more chunks and reset the readerInder to the previous
      *             value
      */
-    private String readDelimiter(String delimiter) {
-        SeekAheadOptimize sao;
-        try {
-            sao = new SeekAheadOptimize(undecodedChunk);
-        } catch (SeekAheadNoBackArrayException ignored) {
-            return readDelimiterStandard(delimiter);
+    private static String readDelimiter(ByteBuf undecodedChunk, String delimiter) {
+        if (!undecodedChunk.hasArray()) {
+            return readDelimiterStandard(undecodedChunk, delimiter);
         }
+        SeekAheadOptimize sao = new SeekAheadOptimize(undecodedChunk);
         int readerIndex = undecodedChunk.readerIndex();
         int delimiterPos = 0;
         int len = delimiter.length();
@@ -1299,7 +1280,8 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
      * @throws ErrorDataDecoderException
      *             write IO error occurs with the FileUpload
      */
-    private void readFileUploadByteMultipartStandard(String delimiter) {
+    private static void readFileUploadByteMultipartStandard(ByteBuf undecodedChunk, String delimiter,
+                                                            FileUpload currentFileUpload) {
         int readerIndex = undecodedChunk.readerIndex();
         // found the decoder limit
         boolean newLine = true;
@@ -1316,7 +1298,6 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
                         found = true;
                         break;
                     }
-                    continue;
                 } else {
                     newLine = false;
                     index = 0;
@@ -1401,19 +1382,18 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
      * FileUpload. If the delimiter is found, the FileUpload is completed.
      *
      * @throws NotEnoughDataDecoderException
-     *             Need more chunks but do not reset the readerInder since some
+     *             Need more chunks but do not reset the {@code readerIndex} since some
      *             values will be already added to the FileOutput
      * @throws ErrorDataDecoderException
      *             write IO error occurs with the FileUpload
      */
-    private void readFileUploadByteMultipart(String delimiter) {
-        SeekAheadOptimize sao;
-        try {
-            sao = new SeekAheadOptimize(undecodedChunk);
-        } catch (SeekAheadNoBackArrayException ignored) {
-            readFileUploadByteMultipartStandard(delimiter);
+    private static void readFileUploadByteMultipart(ByteBuf undecodedChunk, String delimiter,
+                                                    FileUpload currentFileUpload) {
+        if (!undecodedChunk.hasArray()) {
+            readFileUploadByteMultipartStandard(undecodedChunk, delimiter, currentFileUpload);
             return;
         }
+        SeekAheadOptimize sao = new SeekAheadOptimize(undecodedChunk);
         int readerIndex = undecodedChunk.readerIndex();
         // found the decoder limit
         boolean newLine = true;
@@ -1432,7 +1412,6 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
                         found = true;
                         break;
                     }
-                    continue;
                 } else {
                     newLine = false;
                     index = 0;
@@ -1520,7 +1499,8 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
      *             Need more chunks
      * @throws ErrorDataDecoderException
      */
-    private void loadFieldMultipartStandard(String delimiter) {
+    private static void loadFieldMultipartStandard(ByteBuf undecodedChunk, String delimiter,
+                                                   Attribute currentAttribute) {
         int readerIndex = undecodedChunk.readerIndex();
         try {
             // found the decoder limit
@@ -1538,7 +1518,6 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
                             found = true;
                             break;
                         }
-                        continue;
                     } else {
                         newLine = false;
                         index = 0;
@@ -1627,14 +1606,12 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
      *             Need more chunks
      * @throws ErrorDataDecoderException
      */
-    private void loadFieldMultipart(String delimiter) {
-        SeekAheadOptimize sao;
-        try {
-            sao = new SeekAheadOptimize(undecodedChunk);
-        } catch (SeekAheadNoBackArrayException ignored) {
-            loadFieldMultipartStandard(delimiter);
+    private static void loadFieldMultipart(ByteBuf undecodedChunk, String delimiter, Attribute currentAttribute) {
+        if (!undecodedChunk.hasArray()) {
+            loadFieldMultipartStandard(undecodedChunk, delimiter, currentAttribute);
             return;
         }
+        SeekAheadOptimize sao = new SeekAheadOptimize(undecodedChunk);
         int readerIndex = undecodedChunk.readerIndex();
         try {
             // found the decoder limit
@@ -1654,7 +1631,6 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
                             found = true;
                             break;
                         }
-                        continue;
                     } else {
                         newLine = false;
                         index = 0;
@@ -1738,7 +1714,7 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
      *
      * @return the cleaned String
      */
-    @SuppressWarnings("IfStatementWithIdenticalBranches")
+    @SuppressWarnings("StatementWithEmptyBody")
     private static String cleanString(String field) {
         StringBuilder sb = new StringBuilder(field.length());
         for (int i = 0; i < field.length(); i++) {
@@ -1825,7 +1801,7 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
         if (svalue.indexOf(';') >= 0) {
             values = splitMultipartHeaderValues(svalue);
         } else {
-            values = StringUtil.split(svalue, ',');
+            values = svalue.split(",");
         }
         for (String value : values) {
             headers.add(value.trim());

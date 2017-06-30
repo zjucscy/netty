@@ -54,7 +54,7 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf implements
     private boolean freed;
 
     public CompositeByteBuf(ByteBufAllocator alloc, boolean direct, int maxNumComponents) {
-        super(Integer.MAX_VALUE);
+        super(AbstractByteBufAllocator.DEFAULT_MAX_CAPACITY);
         if (alloc == null) {
             throw new NullPointerException("alloc");
         }
@@ -65,7 +65,12 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf implements
     }
 
     public CompositeByteBuf(ByteBufAllocator alloc, boolean direct, int maxNumComponents, ByteBuf... buffers) {
-        super(Integer.MAX_VALUE);
+        this(alloc, direct, maxNumComponents, buffers, 0, buffers.length);
+    }
+
+    CompositeByteBuf(
+            ByteBufAllocator alloc, boolean direct, int maxNumComponents, ByteBuf[] buffers, int offset, int len) {
+        super(AbstractByteBufAllocator.DEFAULT_MAX_CAPACITY);
         if (alloc == null) {
             throw new NullPointerException("alloc");
         }
@@ -79,14 +84,14 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf implements
         this.maxNumComponents = maxNumComponents;
         components = newList(maxNumComponents);
 
-        addComponents0(false, 0, buffers);
+        addComponents0(false, 0, buffers, offset, len);
         consolidateIfNeeded();
         setIndex(0, capacity());
     }
 
     public CompositeByteBuf(
             ByteBufAllocator alloc, boolean direct, int maxNumComponents, Iterable<ByteBuf> buffers) {
-        super(Integer.MAX_VALUE);
+        super(AbstractByteBufAllocator.DEFAULT_MAX_CAPACITY);
         if (alloc == null) {
             throw new NullPointerException("alloc");
         }
@@ -202,7 +207,7 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf implements
      * ownership of all {@link ByteBuf} objects is transfered to this {@link CompositeByteBuf}.
      */
     public CompositeByteBuf addComponents(boolean increaseWriterIndex, ByteBuf... buffers) {
-        addComponents0(increaseWriterIndex, components.size(), buffers);
+        addComponents0(increaseWriterIndex, components.size(), buffers, 0, buffers.length);
         consolidateIfNeeded();
         return this;
     }
@@ -294,19 +299,19 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf implements
      * ownership of all {@link ByteBuf} objects is transfered to this {@link CompositeByteBuf}.
      */
     public CompositeByteBuf addComponents(int cIndex, ByteBuf... buffers) {
-        addComponents0(false, cIndex, buffers);
+        addComponents0(false, cIndex, buffers, 0, buffers.length);
         consolidateIfNeeded();
         return this;
     }
 
-    private int addComponents0(boolean increaseWriterIndex, int cIndex, ByteBuf... buffers) {
+    private int addComponents0(boolean increaseWriterIndex, int cIndex, ByteBuf[] buffers, int offset, int len) {
         checkNotNull(buffers, "buffers");
-        int i = 0;
+        int i = offset;
         try {
             checkComponentIndex(cIndex);
 
             // No need for consolidation
-            while (i < buffers.length) {
+            while (i < len) {
                 // Increment i now to prepare for the next iteration and prevent a duplicate release (addComponent0
                 // will release if an exception occurs, and we also release in the finally block here).
                 ByteBuf b = buffers[i++];
@@ -321,7 +326,7 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf implements
             }
             return cIndex;
         } finally {
-            for (; i < buffers.length; ++i) {
+            for (; i < len; ++i) {
                 ByteBuf b = buffers[i];
                 if (b != null) {
                     try {
@@ -383,7 +388,7 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf implements
         }
 
         Collection<ByteBuf> col = (Collection<ByteBuf>) buffers;
-        return addComponents0(increaseIndex, cIndex, col.toArray(new ByteBuf[col.size()]));
+        return addComponents0(increaseIndex, cIndex, col.toArray(new ByteBuf[col.size()]), 0 , col.size());
     }
 
     /**
@@ -637,10 +642,7 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf implements
 
     @Override
     public CompositeByteBuf capacity(int newCapacity) {
-        ensureAccessible();
-        if (newCapacity < 0 || newCapacity > maxCapacity()) {
-            throw new IllegalArgumentException("newCapacity: " + newCapacity);
-        }
+        checkNewCapacity(newCapacity);
 
         int oldCapacity = capacity();
         if (newCapacity > oldCapacity) {
